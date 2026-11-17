@@ -30,15 +30,15 @@ with left:
             sources=fetch_sources(vendors[vendor]); audit.record_sources(db,run,sources)
             try:
                 from score import score
-                findings=score(sources)
-                audit.save_findings(db,run,findings)
+                findings,metadata=score(sources,return_metadata=True)
+                audit.save_findings(db,run,findings,metadata=metadata)
             except Exception:
                 with db: audit.event(db,run,'error',{'stage':'scoring','message':'Scoring unavailable; check API setup and retry with a new review.'})
                 st.error('The review could not be scored. Check the OpenAI API setup and try a new review.')
 with right:
     st.subheader('What the reviewer checks')
     st.write('Training and data use · Retention · Security assurance · Data location · Subprocessors · Access and sharing · Security basics · Sensitive data')
-    st.caption('An exact source quotation is required for a documented finding. Unknown is a valid result. A person must review the draft.')
+    st.caption('Findings quote source paragraphs. Review their scope, conditions, and evidence coverage. Unknown is a valid result; a person must review the draft.')
 
 runs=db.execute('SELECT id,vendor,created_at,status,findings FROM runs ORDER BY id DESC').fetchall()
 if runs:
@@ -53,11 +53,17 @@ if runs:
     if not findings:
         st.warning('No scored draft is available for this review. Create a new review after checking the setup.')
     else:
-        document=render(row[1],row[3],findings,sources)
+        if any(f.get('summary_mode','legacy')=='legacy' and f.get('quote') for f in findings):
+            st.info('This historical review uses earlier generated summaries. Create a new review to use the updated source-based memo.')
+        decision_event=db.execute("SELECT at,detail FROM events WHERE run_id=? AND step='decision' ORDER BY id DESC LIMIT 1",(selected,)).fetchone()
+        decision_detail=None
+        if decision_event:
+            decision_detail={'at':decision_event[0], **json.loads(decision_event[1])}
+        document=render(row[1],row[3],findings,sources,decision=decision_detail)
         st.markdown(document)
         st.download_button('Download review as Markdown',document,file_name=f'vendor-review-{selected}.md',mime='text/markdown')
         if row[3]=='Draft':
-            with st.form('decision'):
+            with st.form(f'decision-{selected}'):
                 decision=st.radio('Human review decision',('Approve','Reject'),horizontal=True)
                 comment=st.text_input('Optional review note (do not enter sensitive information)',max_chars=500)
                 confirm=st.checkbox('I reviewed the findings and source quotations.')

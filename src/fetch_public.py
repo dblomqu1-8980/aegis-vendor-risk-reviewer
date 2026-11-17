@@ -1,10 +1,23 @@
 """Fetch only preselected HTTPS pages; never follow redirects to unknown hosts."""
 import hashlib
+import re
 import httpx
 from bs4 import BeautifulSoup
 
 MAX_BYTES = 1000000
 MAX_TEXT = 50000
+
+def extract_text(soup):
+    # Retain paragraph boundaries without splitting words around inline links.
+    for node in list(soup.strings):
+        node.replace_with(re.sub(r'\s+', ' ', str(node)))
+    for block in soup.find_all(['p','li','h1','h2','h3','h4','h5','h6','tr','blockquote']):
+        block.insert_before('\n\n')
+        block.insert_after('\n\n')
+    return '\n\n'.join(
+        paragraph for part in soup.get_text(' ').split('\n\n')
+        if (paragraph := ' '.join(part.split()))
+    )
 
 def fetch_sources(urls, client=None):
     if client is None:
@@ -28,7 +41,7 @@ def fetch_sources(urls, client=None):
                         parts.append(chunk)
                     soup=BeautifulSoup(b''.join(parts), 'html.parser')
                     for element in soup(['script','style','nav','footer','header']): element.decompose()
-                    text=' '.join(soup.stripped_strings)
+                    text=extract_text(soup)
                     if not text:
                         source['reason']='Page contained no extractable text.'
                     else:

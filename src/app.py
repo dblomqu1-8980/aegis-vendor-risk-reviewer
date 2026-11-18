@@ -1,9 +1,12 @@
-"""Local demonstration. Do not expose publicly without access and storage controls."""
+"""Evidence-review demo with isolated, invitation-only hosted access."""
+from contextlib import closing
 import json
+import os
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 import audit
+import hosting
 from fetch_public import fetch_sources
 from memo import render
 from rubric import RUBRIC
@@ -15,26 +18,91 @@ st.markdown('''<style>.stApp{background:#F7F6F2;color:#0F1B2D}.block-container{m
 a,b=st.columns([1,7]); a.image(str(ROOT/'data'/'aegis-logo.jpeg'),width=72); b.markdown('**AEGIS AI ADVISORY**  \nPractical AI. Human oversight.')
 st.markdown('<div class="hero"><p>AEGIS INTERACTIVE DEMONSTRATION</p><h1>Know what your AI vendor says.</h1><p>Review public information, identify gaps, and keep a person in control of the decision.</p></div>',unsafe_allow_html=True)
 st.info('Demo only. Public vendor pages may be incomplete or change. Findings are not a legal opinion, certification, or a substitute for reviewing current terms. Do not enter client or confidential information.')
+
+
+def require_invite(config):
+    """Resolve a server-side identity before opening any review database."""
+    if config.mode == 'local':
+        return None
+    session = st.session_state.get('aegis_auth')
+    if session is not None and not hosting.validate_session(config, session):
+        st.session_state.clear()
+        session = None
+        st.info('Your demo session ended. Sign in again with your invite code.')
+    if session is not None:
+        st.sidebar.caption('Signed in to your private demo workspace')
+        if st.sidebar.button('Sign out'):
+            st.session_state.clear()
+            st.rerun()
+        return session
+    st.subheader('Try the Aegis demo')
+    st.write('Enter your personal invite code to start. Each invite has a separate review history. Keep your code private.')
+    with st.form('invite-sign-in', clear_on_submit=True):
+        code = st.text_input('Invite code', type='password', max_chars=100)
+        submitted = st.form_submit_button('Sign in')
+    if submitted:
+        try:
+            with closing(hosting.control_connect(config)) as control:
+                session = hosting.authenticate(config, control, code)
+        except hosting.LimitError as exc:
+            st.warning(str(exc))
+        else:
+            if session is None:
+                st.error('That invite code was not recognized.')
+            else:
+                st.session_state.clear()
+                st.session_state['aegis_auth'] = session
+                st.rerun()
+    st.stop()
+
+
+try:
+    config = hosting.load_config()
+except hosting.ConfigError:
+    st.error('This demo is not accepting sign-ins yet. Please contact the person who shared it.')
+    st.stop()
+session = require_invite(config)
+hosted = config.mode == 'hosted'
+if hosted:
+    st.caption('Free hosted demo: saved reviews can reset when the host restarts. Download your memo to keep a copy. Live reviews use a paid API and have daily limits.')
 vendors=json.loads((ROOT/'data'/'vendors.json').read_text())
-db=audit.connect()
+db=audit.connect(hosting.review_db_path(config,session)) if hosted else audit.connect()
 left,right=st.columns([1.3,1])
 with left:
     st.subheader('Start a vendor review')
     vendor=st.selectbox('Vendor and product scope',list(vendors))
     st.caption('The selected public URLs will be reviewed:')
     for url in vendors[vendor]: st.write(url)
-    if st.button('Create draft review',type='primary'):
+    api_ready = bool(os.getenv('OPENAI_API_KEY', '').strip())
+    if hosted and not api_ready:
+        st.warning('Live review generation is temporarily unavailable. Existing reviews can still be opened.')
+    if st.button('Create draft review',type='primary',disabled=hosted and not api_ready):
+        if hosted:
+            try:
+                with closing(hosting.control_connect(config)) as control:
+                    hosting.reserve_review(config, control, session)
+            except hosting.LimitError as exc:
+                db.close()
+                st.warning(str(exc))
+                st.stop()
+            except hosting.AuthenticationError:
+                db.close()
+                st.session_state.clear()
+                st.rerun()
         run=audit.create_run(db,vendor)
         st.session_state.run_id=run
         with st.spinner('Retrieving public pages and checking the evidence…'):
             sources=fetch_sources(vendors[vendor]); audit.record_sources(db,run,sources)
             try:
-                from score import score
-                findings,metadata=score(sources,return_metadata=True)
+                from score import score, InputBudgetError
+                findings,metadata=score(sources,return_metadata=True,model='gpt-4o-mini' if hosted else None)
                 audit.save_findings(db,run,findings,metadata=metadata)
+            except InputBudgetError:
+                with db: audit.event(db,run,'error',{'stage':'scoring','message':'Input exceeded demo scoring budget; no API request made.'})
+                st.error('The captured pages exceed this demo’s review size limit. No API request was made.')
             except Exception:
                 with db: audit.event(db,run,'error',{'stage':'scoring','message':'Scoring unavailable; check API setup and retry with a new review.'})
-                st.error('The review could not be scored. Check the OpenAI API setup and try a new review.')
+                st.error('The review could not be scored. Please try again later.')
 with right:
     st.subheader('What the reviewer checks')
     st.write('Training and data use · Retention · Security assurance · Data location · Subprocessors · Access and sharing · Security basics · Sensitive data')
@@ -72,6 +140,7 @@ if runs:
                 if not confirm: st.warning('Confirm that you reviewed the draft before recording a decision.')
                 else:
                     audit.decide(db,selected,'Approved' if decision=='Approve' else 'Rejected',comment)
+                    db.close()
                     st.rerun()
     with st.expander('Audit trail and captured source text'):
         for at,step,detail in db.execute('SELECT at,step,detail FROM events WHERE run_id=? ORDER BY id',(selected,)):

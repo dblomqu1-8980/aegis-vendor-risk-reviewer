@@ -16,6 +16,7 @@ from score import validate_findings
 
 @pytest.fixture
 def review_app(tmp_path, monkeypatch):
+    monkeypatch.setenv('AEGIS_MODE', 'local')
     path = tmp_path / 'reviews.sqlite3'
     original_connect = audit.connect
     monkeypatch.setattr(audit, 'connect', lambda: original_connect(path))

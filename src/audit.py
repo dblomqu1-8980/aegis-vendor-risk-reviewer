@@ -8,8 +8,9 @@ DB = Path(__file__).resolve().parents[1]/'.runtime'/'reviews.sqlite3'
 
 def connect(path=DB):
     path.parent.mkdir(parents=True,exist_ok=True)
-    db=sqlite3.connect(path)
+    db=sqlite3.connect(path,timeout=15)
     db.execute('PRAGMA foreign_keys=ON')
+    db.execute('PRAGMA journal_mode=WAL')
     db.executescript('''CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, vendor TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL, findings TEXT NOT NULL DEFAULT '[]');
     CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id), at TEXT NOT NULL, step TEXT NOT NULL, detail TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sources (run_id INTEGER NOT NULL REFERENCES runs(id), url TEXT NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL, sha256 TEXT, reason TEXT NOT NULL, truncated INTEGER NOT NULL DEFAULT 0);''')
